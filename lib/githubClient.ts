@@ -1,5 +1,4 @@
 import { GitHubStatsResponse } from "./types";
-import fetch from "node-fetch";
 
 const GITHUB_QUERY = `
   query($username: String!) {
