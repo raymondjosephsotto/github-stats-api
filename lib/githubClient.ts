@@ -7,6 +7,7 @@ const GITHUB_QUERY = `
       repositories(first: 100, ownerAffiliations: OWNER, privacy: PUBLIC) {
         totalCount
         nodes {
+          isFork
           stargazerCount
           languages(first: 5, orderBy: { field: SIZE, direction: DESC }) {
             edges {
