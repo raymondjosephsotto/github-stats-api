@@ -297,17 +297,10 @@ const fetchGitHubStats = async (
 
       totalRankedRepos += 1;
 
-      const existing = langMap[repo.primaryLanguage.name];
       const color = repo.primaryLanguage.color ?? "#cccccc";
-
-      if (existing) {
-        existing.repoCount += 1;
-        return;
-      }
-
       langMap[repo.primaryLanguage.name] = {
         color,
-        repoCount: 1,
+        repoCount: (langMap[repo.primaryLanguage.name]?.repoCount ?? 0) + 1,
       };
     });
 
