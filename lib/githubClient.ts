@@ -5,12 +5,11 @@ const PROFILE_QUERY = `
     $username: String!
     $heatmapFrom: DateTime!
     $heatmapTo: DateTime!
-    $lifetimeFrom: DateTime!
-    $lifetimeTo: DateTime!
   ) {
     user(login: $username) {
       login
       name
+      createdAt
       avatarUrl(size: 200)
       repositories(ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false) {
         totalCount
@@ -21,13 +20,6 @@ const PROFILE_QUERY = `
         contributionTypes: [COMMIT, PULL_REQUEST, REPOSITORY]
       ) {
         totalCount
-      }
-      lifetimeContributions: contributionsCollection(
-        from: $lifetimeFrom
-        to: $lifetimeTo
-      ) {
-        totalCommitContributions
-        totalPullRequestContributions
       }
       yearlyContributions: contributionsCollection(
         from: $heatmapFrom
@@ -91,16 +83,13 @@ type ProfileQueryData = {
   user: {
     login: string;
     name: string | null;
+    createdAt: string;
     avatarUrl: string;
     repositories: {
       totalCount: number;
     };
     repositoriesContributedTo: {
       totalCount: number;
-    };
-    lifetimeContributions: {
-      totalCommitContributions: number;
-      totalPullRequestContributions: number;
     };
     yearlyContributions: {
       contributionCalendar: {
@@ -113,6 +102,15 @@ type ProfileQueryData = {
           }>;
         }>;
       };
+    };
+  } | null;
+};
+
+type ContributionsWindowQueryData = {
+  user: {
+    contributions: {
+      totalCommitContributions: number;
+      totalPullRequestContributions: number;
     };
   } | null;
 };
@@ -160,7 +158,17 @@ const levelMap: Record<string, 0 | 1 | 2 | 3 | 4> = {
 };
 
 const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
-const LIFETIME_CONTRIBUTIONS_START = "2007-10-01T00:00:00.000Z";
+
+const CONTRIBUTIONS_WINDOW_QUERY = `
+  query($username: String!, $from: DateTime!, $to: DateTime!) {
+    user(login: $username) {
+      contributions: contributionsCollection(from: $from, to: $to) {
+        totalCommitContributions
+        totalPullRequestContributions
+      }
+    }
+  }
+`;
 
 async function runGitHubQuery<T>(
   token: string,
@@ -189,6 +197,59 @@ async function runGitHubQuery<T>(
   return result.data;
 }
 
+function addYearsUtc(date: Date, years: number): Date {
+  return new Date(
+    Date.UTC(
+      date.getUTCFullYear() + years,
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      date.getUTCHours(),
+      date.getUTCMinutes(),
+      date.getUTCSeconds(),
+      date.getUTCMilliseconds(),
+    ),
+  );
+}
+
+async function fetchLifetimeContributionTotals(
+  token: string,
+  username: string,
+  createdAtIso: string,
+  now: Date,
+): Promise<{ totalCommits: number; totalPullRequests: number }> {
+  let windowStart = new Date(createdAtIso);
+  let totalCommits = 0;
+  let totalPullRequests = 0;
+
+  while (windowStart <= now) {
+    const nextWindowStart = addYearsUtc(windowStart, 1);
+    const windowEnd = new Date(
+      Math.min(now.getTime(), nextWindowStart.getTime() - 1),
+    );
+
+    const contributionData = await runGitHubQuery<ContributionsWindowQueryData>(
+      token,
+      CONTRIBUTIONS_WINDOW_QUERY,
+      {
+        username,
+        from: windowStart.toISOString(),
+        to: windowEnd.toISOString(),
+      },
+    );
+
+    if (!contributionData.user) {
+      throw new Error("GitHub API returned no contribution data");
+    }
+
+    totalCommits += contributionData.user.contributions.totalCommitContributions;
+    totalPullRequests += contributionData.user.contributions.totalPullRequestContributions;
+
+    windowStart = nextWindowStart;
+  }
+
+  return { totalCommits, totalPullRequests };
+}
+
 const fetchGitHubStats = async (
   token: string,
   username: string,
@@ -200,8 +261,6 @@ const fetchGitHubStats = async (
     username,
     heatmapFrom: startOfYear.toISOString(),
     heatmapTo: now.toISOString(),
-    lifetimeFrom: LIFETIME_CONTRIBUTIONS_START,
-    lifetimeTo: now.toISOString(),
   });
 
   if (!profileData.user) {
@@ -209,6 +268,12 @@ const fetchGitHubStats = async (
   }
 
   const user = profileData.user;
+  const lifetimeTotals = await fetchLifetimeContributionTotals(
+    token,
+    username,
+    user.createdAt,
+    now,
+  );
   const langMap: Record<string, { color: string; size: number }> = {};
   let totalStars = 0;
   let cursor: string | null = null;
@@ -273,6 +338,17 @@ const fetchGitHubStats = async (
     .slice(0, 5);
 
   const calendar = user.yearlyContributions.contributionCalendar;
+  const heatmapFrom = startOfYear.toISOString();
+  const heatmapTo = now.toISOString();
+  const heatmapDays = calendar.weeks.map((week) => ({
+    days: week.contributionDays
+      .filter((day) => day.date >= heatmapFrom.slice(0, 10) && day.date <= heatmapTo.slice(0, 10))
+      .map((day) => ({
+        date: day.date,
+        count: day.contributionCount,
+        level: levelMap[day.contributionLevel] ?? 0,
+      })),
+  })).filter((week) => week.days.length > 0);
 
   return {
     profile: {
@@ -284,21 +360,15 @@ const fetchGitHubStats = async (
       contributedTo: user.repositoriesContributedTo.totalCount,
       total: user.repositories.totalCount,
     },
-    totalCommits: user.lifetimeContributions.totalCommitContributions,
-    totalPullRequests: user.lifetimeContributions.totalPullRequestContributions,
+    totalCommits: lifetimeTotals.totalCommits,
+    totalPullRequests: lifetimeTotals.totalPullRequests,
     totalStars,
     topLanguages,
     contributions: {
       total: calendar.totalContributions,
-      from: startOfYear.toISOString(),
-      to: now.toISOString(),
-      weeks: calendar.weeks.map((week) => ({
-        days: week.contributionDays.map((day) => ({
-          date: day.date,
-          count: day.contributionCount,
-          level: levelMap[day.contributionLevel] ?? 0,
-        })),
-      })),
+      from: heatmapFrom,
+      to: heatmapTo,
+      weeks: heatmapDays,
     },
   };
 };
