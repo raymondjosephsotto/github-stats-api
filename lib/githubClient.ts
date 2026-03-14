@@ -59,14 +59,9 @@ const REPOSITORIES_QUERY = `
           isArchived
           isEmpty
           stargazerCount
-          languages(first: 20, orderBy: { field: SIZE, direction: DESC }) {
-            edges {
-              size
-              node {
-                name
-                color
-              }
-            }
+          primaryLanguage {
+            name
+            color
           }
         }
       }
@@ -126,15 +121,10 @@ type RepositoriesQueryData = {
         isArchived: boolean;
         isEmpty: boolean;
         stargazerCount: number;
-        languages: {
-          edges: Array<{
-            size: number;
-            node: {
-              name: string;
-              color: string | null;
-            };
-          }>;
-        };
+        primaryLanguage: {
+          name: string;
+          color: string | null;
+        } | null;
       }>;
     };
   } | null;
@@ -274,10 +264,11 @@ const fetchGitHubStats = async (
     user.createdAt,
     now,
   );
-  const langMap: Record<string, { color: string; size: number }> = {};
+  const langMap: Record<string, { color: string; repoCount: number }> = {};
   let totalStars = 0;
   let cursor: string | null = null;
   let hasNextPage = true;
+  let totalRankedRepos = 0;
 
   while (hasNextPage) {
     const repositoryData: RepositoriesQueryData = await runGitHubQuery<RepositoriesQueryData>(
@@ -300,39 +291,38 @@ const fetchGitHubStats = async (
         return;
       }
 
-      repo.languages.edges.forEach((edge: RepositoryNode["languages"]["edges"][number]) => {
-        const existing = langMap[edge.node.name];
-        const color = edge.node.color ?? "#cccccc";
+      if (!repo.primaryLanguage) {
+        return;
+      }
 
-        if (existing) {
-          existing.size += edge.size;
-          return;
-        }
+      totalRankedRepos += 1;
 
-        langMap[edge.node.name] = {
-          color,
-          size: edge.size,
-        };
-      });
+      const existing = langMap[repo.primaryLanguage.name];
+      const color = repo.primaryLanguage.color ?? "#cccccc";
+
+      if (existing) {
+        existing.repoCount += 1;
+        return;
+      }
+
+      langMap[repo.primaryLanguage.name] = {
+        color,
+        repoCount: 1,
+      };
     });
 
     hasNextPage = repositories.pageInfo.hasNextPage;
     cursor = repositories.pageInfo.endCursor;
   }
 
-  const totalLanguageBytes = Object.values(langMap).reduce(
-    (sum, language) => sum + language.size,
-    0,
-  );
-
   const topLanguages = Object.entries(langMap)
-    .map(([name, { color, size }]) => ({
+    .map(([name, { color, repoCount }]) => ({
       name,
       color,
       percentage:
-        totalLanguageBytes === 0
+        totalRankedRepos === 0
           ? 0
-          : Math.round((size / totalLanguageBytes) * 1000) / 10,
+          : Math.round((repoCount / totalRankedRepos) * 1000) / 10,
     }))
     .sort((a, b) => b.percentage - a.percentage)
     .slice(0, 5);
