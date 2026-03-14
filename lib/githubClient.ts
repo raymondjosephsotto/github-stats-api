@@ -1,28 +1,38 @@
 import { GitHubStatsResponse } from "./types";
 
-const GITHUB_QUERY = `
-  query($username: String!) {
+const PROFILE_QUERY = `
+  query(
+    $username: String!
+    $heatmapFrom: DateTime!
+    $heatmapTo: DateTime!
+    $lifetimeFrom: DateTime!
+    $lifetimeTo: DateTime!
+  ) {
     user(login: $username) {
-      
-      repositories(first: 100, ownerAffiliations: OWNER, privacy: PUBLIC) {
+      login
+      name
+      avatarUrl(size: 200)
+      repositories(ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false) {
         totalCount
-        nodes {
-          isFork
-          stargazerCount
-          languages(first: 5, orderBy: { field: SIZE, direction: DESC }) {
-            edges {
-              size
-              node {
-                name
-                color
-              }
-            }
-          }
-        }
       }
-
-      contributionsCollection {
+      repositoriesContributedTo(
+        first: 1
+        privacy: PUBLIC
+        contributionTypes: [COMMIT, PULL_REQUEST, REPOSITORY]
+      ) {
+        totalCount
+      }
+      lifetimeContributions: contributionsCollection(
+        from: $lifetimeFrom
+        to: $lifetimeTo
+      ) {
         totalCommitContributions
+        totalPullRequestContributions
+      }
+      yearlyContributions: contributionsCollection(
+        from: $heatmapFrom
+        to: $heatmapTo
+      ) {
         contributionCalendar {
           totalContributions
           weeks {
@@ -34,12 +44,113 @@ const GITHUB_QUERY = `
           }
         }
       }
-
     }
   }
 `;
 
-// Lookup table — converts GitHub's level strings to our numeric 0–4 scale
+const REPOSITORIES_QUERY = `
+  query($username: String!, $cursor: String) {
+    user(login: $username) {
+      repositories(
+        first: 100
+        after: $cursor
+        ownerAffiliations: OWNER
+        privacy: PUBLIC
+        isFork: false
+        orderBy: { field: UPDATED_AT, direction: DESC }
+      ) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          isArchived
+          isEmpty
+          stargazerCount
+          languages(first: 20, orderBy: { field: SIZE, direction: DESC }) {
+            edges {
+              size
+              node {
+                name
+                color
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+type GitHubGraphQLResponse<T> = {
+  data?: T;
+  errors?: Array<{ message?: string }>;
+};
+
+type ProfileQueryData = {
+  user: {
+    login: string;
+    name: string | null;
+    avatarUrl: string;
+    repositories: {
+      totalCount: number;
+    };
+    repositoriesContributedTo: {
+      totalCount: number;
+    };
+    lifetimeContributions: {
+      totalCommitContributions: number;
+      totalPullRequestContributions: number;
+    };
+    yearlyContributions: {
+      contributionCalendar: {
+        totalContributions: number;
+        weeks: Array<{
+          contributionDays: Array<{
+            date: string;
+            contributionCount: number;
+            contributionLevel: string;
+          }>;
+        }>;
+      };
+    };
+  } | null;
+};
+
+type RepositoriesQueryData = {
+  user: {
+    repositories: {
+      pageInfo: {
+        hasNextPage: boolean;
+        endCursor: string | null;
+      };
+      nodes: Array<{
+        isArchived: boolean;
+        isEmpty: boolean;
+        stargazerCount: number;
+        languages: {
+          edges: Array<{
+            size: number;
+            node: {
+              name: string;
+              color: string | null;
+            };
+          }>;
+        };
+      }>;
+    };
+  } | null;
+};
+
+type RepositoryNode = NonNullable<
+  RepositoriesQueryData["user"]
+>["repositories"]["nodes"][number];
+
+type RepositoryConnection = NonNullable<
+  RepositoriesQueryData["user"]
+>["repositories"];
+
+// Converts GitHub's contribution levels to a numeric 0-4 scale.
 const levelMap: Record<string, 0 | 1 | 2 | 3 | 4> = {
   NONE: 0,
   FIRST_QUARTILE: 1,
@@ -48,105 +159,148 @@ const levelMap: Record<string, 0 | 1 | 2 | 3 | 4> = {
   FOURTH_QUARTILE: 4,
 };
 
-const fetchGitHubStats = async (token: string, username: string): Promise<GitHubStatsResponse> => {
+const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
+const LIFETIME_CONTRIBUTIONS_START = "2007-10-01T00:00:00.000Z";
 
-  // Send a POST request to GitHub's GraphQL endpoint with our query and auth token
-  const response = await fetch("https://api.github.com/graphql", {
+async function runGitHubQuery<T>(
+  token: string,
+  query: string,
+  variables: Record<string, string | null>,
+): Promise<T> {
+  const response = await fetch(GITHUB_GRAPHQL_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `bearer ${token}`,
+      Authorization: `bearer ${token}`,
     },
-    body: JSON.stringify({
-      query: GITHUB_QUERY,
-      variables: { username },
-    }),
+    body: JSON.stringify({ query, variables }),
   });
 
-  // Parse the JSON response — typed as any because the raw GitHub shape is deeply nested
-  const data = await response.json() as any;
+  const result = (await response.json()) as GitHubGraphQLResponse<T>;
 
-  //GitHub's GraphQL API returns errors inside the response body (not as HTTP error codes) — so response.ok can be true even when something went wrong.
-  if (data.errors || !data.data?.user) {
-    throw new Error(data.errors?.[0]?.message ?? "GitHub API returned no user data");
+  if (result.errors?.length) {
+    throw new Error(result.errors[0]?.message ?? "GitHub API request failed");
   }
 
-  // Shortcut reference to avoid repeating data.data.user everywhere
-  const user = data.data.user;
+  if (!result.data) {
+    throw new Error("GitHub API returned no data");
+  }
 
-  // Total number of public repositories owned by the user
-  const totalRepos: number = user.repositories.totalCount;
+  return result.data;
+}
 
-  // Sum stargazer counts across all repos to get a total star count
-  const totalStars: number = user.repositories.nodes.reduce(
-    (sum: number, repo: any) => sum + repo.stargazerCount, 0
-  );
+const fetchGitHubStats = async (
+  token: string,
+  username: string,
+): Promise<GitHubStatsResponse> => {
+  const now = new Date();
+  const startOfYear = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
 
-  // Total commits made this year from the contributions collection
-  const commitsThisYear: number = user.contributionsCollection.totalCommitContributions;
+  const profileData = await runGitHubQuery<ProfileQueryData>(token, PROFILE_QUERY, {
+    username,
+    heatmapFrom: startOfYear.toISOString(),
+    heatmapTo: now.toISOString(),
+    lifetimeFrom: LIFETIME_CONTRIBUTIONS_START,
+    lifetimeTo: now.toISOString(),
+  });
 
-  // Accumulate total bytes written per language across all repos
-  // Key = language name, value = { color, running byte total }
+  if (!profileData.user) {
+    throw new Error("GitHub API returned no user data");
+  }
+
+  const user = profileData.user;
   const langMap: Record<string, { color: string; size: number }> = {};
+  let totalStars = 0;
+  let cursor: string | null = null;
+  let hasNextPage = true;
 
-  // loops through each repo, excluding forks
-  user.repositories.nodes
-    .filter((repo: any) => !repo.isFork)
-    .forEach((repo: any) => {
-      // loops each language edge inside the looped repo
-      repo.languages.edges.forEach((edge: any) => {
-        const name: string = edge.node.name;
-        const color: string = edge.node.color ?? "#ccc"; // fallback if GitHub returns null
-        const size: number = edge.size;                  // bytes of code in this language
+  while (hasNextPage) {
+    const repositoryData: RepositoriesQueryData = await runGitHubQuery<RepositoriesQueryData>(
+      token,
+      REPOSITORIES_QUERY,
+      { username, cursor },
+    );
 
-        if (langMap[name]) {
-          // Language already seen — add to its running byte total
-          langMap[name].size += size;
-        } else {
-          // First occurrence — initialize a new entry in the map
-          langMap[name] = { color, size };
+    if (!repositoryData.user) {
+      throw new Error("GitHub API returned no repository data");
+    }
+
+    const repositories: RepositoryConnection = repositoryData.user.repositories;
+
+    repositories.nodes.forEach((repo: RepositoryNode) => {
+      totalStars += repo.stargazerCount;
+
+      // Empty or archived repos can skew language rankings with stale/generated code.
+      if (repo.isArchived || repo.isEmpty) {
+        return;
+      }
+
+      repo.languages.edges.forEach((edge: RepositoryNode["languages"]["edges"][number]) => {
+        const existing = langMap[edge.node.name];
+        const color = edge.node.color ?? "#cccccc";
+
+        if (existing) {
+          existing.size += edge.size;
+          return;
         }
+
+        langMap[edge.node.name] = {
+          color,
+          size: edge.size,
+        };
       });
     });
 
-  // Total bytes across all languages — used as the denominator for percentages
-  const totalBytes: number = Object.values(langMap).reduce(
-    (sum, lang) => sum + lang.size, 0
+    hasNextPage = repositories.pageInfo.hasNextPage;
+    cursor = repositories.pageInfo.endCursor;
+  }
+
+  const totalLanguageBytes = Object.values(langMap).reduce(
+    (sum, language) => sum + language.size,
+    0,
   );
 
-  // Convert map to a sorted array of Language objects with calculated percentages
-  // Rounded to one decimal place, sorted highest to lowest, capped at top 5
   const topLanguages = Object.entries(langMap)
     .map(([name, { color, size }]) => ({
       name,
       color,
-      percentage: Math.round((size / totalBytes) * 1000) / 10,
+      percentage:
+        totalLanguageBytes === 0
+          ? 0
+          : Math.round((size / totalLanguageBytes) * 1000) / 10,
     }))
     .sort((a, b) => b.percentage - a.percentage)
     .slice(0, 5);
 
-  // Shortcut to the raw calendar data
-  const calendar = user.contributionsCollection.contributionCalendar;
-
-  const contributions = {
-    total: calendar.totalContributions,
-    weeks: calendar.weeks.map((week: any) => ({
-      days: week.contributionDays.map((day: any) => ({
-        date: day.date,
-        count: day.contributionCount,
-        level: levelMap[day.contributionLevel] ?? 0,
-      })),
-    })),
-  };
+  const calendar = user.yearlyContributions.contributionCalendar;
 
   return {
-    totalRepos,
+    profile: {
+      avatarUrl: user.avatarUrl,
+      displayName: user.name ?? user.login,
+      username: user.login,
+    },
+    repositories: {
+      contributedTo: user.repositoriesContributedTo.totalCount,
+      total: user.repositories.totalCount,
+    },
+    totalCommits: user.lifetimeContributions.totalCommitContributions,
+    totalPullRequests: user.lifetimeContributions.totalPullRequestContributions,
     totalStars,
-    commitsThisYear,
     topLanguages,
-    contributions,
+    contributions: {
+      total: calendar.totalContributions,
+      from: startOfYear.toISOString(),
+      to: now.toISOString(),
+      weeks: calendar.weeks.map((week) => ({
+        days: week.contributionDays.map((day) => ({
+          date: day.date,
+          count: day.contributionCount,
+          level: levelMap[day.contributionLevel] ?? 0,
+        })),
+      })),
+    },
   };
-
 };
 
 export { fetchGitHubStats };
