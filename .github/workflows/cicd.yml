@@ -1,0 +1,51 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Grant the GITHUB_TOKEN write access so the version bump commit can be pushed
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          # Pass the token so git push has authenticated credentials
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm install
+      - name: Run type check
+        run: npm run build
+      - name: Version bump & changelog
+        # Skip if commit message contains [skip version] — useful for docs, chores, refactors
+        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip version]')
+        run: |
+          npm version patch --no-git-tag-version
+          npm run changelog
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add package.json package-lock.json CHANGELOG.md
+          git commit -m "ci: bump version [skip ci]"
+          # Tag the release so changelogen knows the range for next run
+          git tag "v$(node -p "require('./package.json').version")"
+          git push && git push --tags
+      - name: Deploy to Vercel
+        # Only deploy on push to main, not on pull requests
+        if: github.event_name == 'push'
+        # Use Vercel CLI directly — avoids third-party action schema issues
+        run: npx vercel --token ${{ secrets.VERCEL_TOKEN }} --prod --yes
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
