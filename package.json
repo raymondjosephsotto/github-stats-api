@@ -1,6 +1,6 @@
 {
   "name": "github-stats-api",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Serverless API that exposes GitHub profile stats as a clean JSON endpoint",
   "main": "index.js",
   "scripts": {
