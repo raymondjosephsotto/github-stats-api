@@ -1,6 +1,17 @@
 # Changelog
 
 
+## ...main
+
+
+### 🏡 Chore
+
+- Update changelog for v1.0.1 release with enhancements and fixes ([733e753](https://github.com/raymondjosephsotto/github-stats-api/commit/733e753))
+
+### ❤️ Contributors
+
+- Raymond Sotto <raymondjosephsotto@gmail.com>
+
 ## v1.0.0...v1.0.1
 
 [compare changes](https://github.com/raymondjosephsotto/github-stats-api/compare/v1.0.0...v1.0.1)
