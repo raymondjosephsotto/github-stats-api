@@ -188,17 +188,9 @@ async function runGitHubQuery<T>(
 }
 
 function addYearsUtc(date: Date, years: number): Date {
-  return new Date(
-    Date.UTC(
-      date.getUTCFullYear() + years,
-      date.getUTCMonth(),
-      date.getUTCDate(),
-      date.getUTCHours(),
-      date.getUTCMinutes(),
-      date.getUTCSeconds(),
-      date.getUTCMilliseconds(),
-    ),
-  );
+  const newDate = new Date(date);
+  newDate.setUTCFullYear(date.getUTCFullYear() + years);
+  return newDate;
 }
 
 async function fetchLifetimeContributionTotals(
@@ -246,11 +238,14 @@ const fetchGitHubStats = async (
 ): Promise<GitHubStatsResponse> => {
   const now = new Date();
   const startOfYear = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+  // Compute once and reuse in both the query and the response shape
+  const heatmapFrom = startOfYear.toISOString();
+  const heatmapTo = now.toISOString();
 
   const profileData = await runGitHubQuery<ProfileQueryData>(token, PROFILE_QUERY, {
     username,
-    heatmapFrom: startOfYear.toISOString(),
-    heatmapTo: now.toISOString(),
+    heatmapFrom,
+    heatmapTo,
   });
 
   if (!profileData.user) {
@@ -321,8 +316,6 @@ const fetchGitHubStats = async (
     .slice(0, 5);
 
   const calendar = user.yearlyContributions.contributionCalendar;
-  const heatmapFrom = startOfYear.toISOString();
-  const heatmapTo = now.toISOString();
   const heatmapDays = calendar.weeks.map((week) => ({
     days: week.contributionDays
       .filter((day) => day.date >= heatmapFrom.slice(0, 10) && day.date <= heatmapTo.slice(0, 10))
